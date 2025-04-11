@@ -661,3 +661,75 @@
     )
   )
 )
+
+;; Register container descriptive information
+(define-public (register-container-metadata (container-id uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+      )
+      ;; Only authorized parties can register metadata
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (not (is-eq (get container-status container-data) "completed")) (err u160))
+      (asserts! (not (is-eq (get container-status container-data) "reverted")) (err u161))
+      (asserts! (not (is-eq (get container-status container-data) "outdated")) (err u162))
+
+      ;; Valid metadata categories
+      (asserts! (or (is-eq metadata-category "resource-details") 
+                   (is-eq metadata-category "movement-proof")
+                   (is-eq metadata-category "integrity-check")
+                   (is-eq metadata-category "originator-preferences")) (err u163))
+
+      (print {action: "metadata_registered", container-id: container-id, metadata-category: metadata-category, 
+              metadata-digest: metadata-digest, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Configure delayed recovery mechanism
+(define-public (configure-delayed-recovery (container-id uint) (delay-blocks uint) (recovery-principal principal))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> delay-blocks u72) ERROR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-blocks u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (accessible-block (+ block-height delay-blocks))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (asserts! (not (is-eq recovery-principal originator)) (err u180)) ;; Recovery principal must differ from originator
+      (asserts! (not (is-eq recovery-principal (get destination container-data))) (err u181)) ;; Recovery principal must differ from destination
+      (print {action: "delayed_recovery_configured", container-id: container-id, originator: originator, 
+              recovery-principal: recovery-principal, accessible-block: accessible-block})
+      (ok accessible-block)
+    )
+  )
+)
+
+;; Additional confirmation for significant resources
+(define-public (record-external-approval (container-id uint) (approver principal))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only for significant resource quantities (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (print {action: "external_approval_recorded", container-id: container-id, approver: approver, requester: tx-sender})
+      (ok true)
+    )
+  )
+)

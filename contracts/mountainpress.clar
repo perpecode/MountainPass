@@ -136,3 +136,94 @@
   )
 )
 
+;; Finalize resource delivery to destination
+(define-public (finalize-resource-delivery (container-id uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (destination (get destination container-data))
+        (quantity (get quantity container-data))
+        (resource (get resource-id container-data))
+      )
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender (get originator container-data))) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (asserts! (<= block-height (get termination-block container-data)) ERROR_CONTAINER_OUTDATED)
+      (match (as-contract (stx-transfer? quantity tx-sender destination))
+        success
+          (begin
+            (map-set HoldingRegistry
+              { container-id: container-id }
+              (merge container-data { container-status: "completed" })
+            )
+            (print {action: "resources_delivered", container-id: container-id, destination: destination, resource-id: resource, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_UNSUCCESSFUL
+      )
+    )
+  )
+)
+
+;; Implement emergency container lockdown
+(define-public (emergency-container-lockdown (container-id uint) (reason (string-ascii 50)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (lockdown-expiry (+ block-height u144)) ;; 24 hours lockdown
+      )
+      ;; Only authorized parties can initiate lockdown
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_PERMISSION_DENIED)
+      ;; Can only lock containers in active states
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "acknowledged")) 
+                ERROR_OPERATION_COMPLETED)
+      ;; Set container to locked status
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { container-status: "locked" })
+      )
+      (print {action: "emergency_lockdown", container-id: container-id, initiator: tx-sender, reason: reason, expiry: lockdown-expiry})
+      (ok lockdown-expiry)
+    )
+  )
+)
+
+;; Register security-critical container modification with audit trail
+(define-public (register-secure-modification (container-id uint) (modification-type (string-ascii 20)) (modification-digest (buff 32)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Verify caller is authorized to modify
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender originator)) ERROR_PERMISSION_DENIED)
+      ;; Only active containers can be modified
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      ;; Validate modification type
+      (asserts! (or (is-eq modification-type "destination-change") 
+                   (is-eq modification-type "duration-change")
+                   (is-eq modification-type "security-upgrade")
+                   (is-eq modification-type "conditions-update")) (err u240))
+      ;; For high-value containers, require additional verification
+      (if (> quantity u50000)
+          (asserts! (is-eq tx-sender SYSTEM_OVERSEER) (err u241))
+          true
+      )
+      (print {action: "secure_modification_registered", container-id: container-id, modifier: tx-sender, 
+              modification-type: modification-type, modification-digest: modification-digest,
+              block-height: block-height, timestamp: block-height})
+      (ok true)
+    )
+  )
+)
+

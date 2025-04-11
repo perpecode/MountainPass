@@ -577,3 +577,87 @@
   )
 )
 
+;; Schedule critical system operation
+(define-public (schedule-critical-procedure (procedure-name (string-ascii 20)) (procedure-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender SYSTEM_OVERSEER) ERROR_PERMISSION_DENIED)
+    (asserts! (> (len procedure-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-time (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "procedure_scheduled", procedure: procedure-name, parameters: procedure-parameters, execution-time: execution-time})
+      (ok execution-time)
+    )
+  )
+)
+
+;; Enable enhanced authentication
+(define-public (activate-enhanced-authentication (container-id uint) (authentication-hash (buff 32)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only for containers above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (print {action: "enhanced_authentication_activated", container-id: container-id, originator: originator, auth-digest: (hash160 authentication-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic operation verification
+(define-public (verify-cryptographic-operation (container-id uint) (message-digest (buff 32)) (signature (buff 65)) (signer principal))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (verification-result (unwrap! (secp256k1-recover? message-digest signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq signer originator) (is-eq signer destination)) (err u151))
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+
+      ;; Verify signature matches expected signer
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signer) (err u153))
+
+      (print {action: "cryptographic_verification_complete", container-id: container-id, verifier: tx-sender, signer: signer})
+      (ok true)
+    )
+  )
+)
+
+;; Setup multi-signature requirements for high-value containers
+(define-public (setup-multisig-requirements (container-id uint) (required-signatures uint) (authorized-signers (list 5 principal)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> required-signatures u1) ERROR_INVALID_QUANTITY)
+    (asserts! (<= required-signatures (len authorized-signers)) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      ;; Only for high-value transfers (> 5000 STX)
+      (asserts! (> quantity u5000) (err u220))
+      (asserts! (> (len authorized-signers) u1) (err u221))
+
+      (print {action: "multisig_configured", container-id: container-id, originator: originator, 
+              required-signatures: required-signatures, authorized-signers: authorized-signers})
+      (ok true)
+    )
+  )
+)

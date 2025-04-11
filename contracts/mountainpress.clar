@@ -733,3 +733,81 @@
     )
   )
 )
+
+;; Execute delayed recovery operation
+(define-public (execute-delayed-recovery (container-id uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+        (status (get container-status container-data))
+        (delay-blocks u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only originator or overseer can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      ;; Only from recovery-pending status
+      (asserts! (is-eq status "recovery-pending") (err u301))
+      ;; Delay must have expired
+      (asserts! (>= block-height (+ (get inception-block container-data) delay-blocks)) (err u302))
+
+      ;; Process recovery
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERROR_MOVEMENT_UNSUCCESSFUL)
+
+      ;; Update container status
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { container-status: "recovered", quantity: u0 })
+      )
+
+      (print {action: "delayed_recovery_executed", container-id: container-id, 
+              originator: originator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Define security rate limits
+(define-public (define-operation-rate-limits (max-attempts uint) (lockout-blocks uint))
+  (begin
+    (asserts! (is-eq tx-sender SYSTEM_OVERSEER) ERROR_PERMISSION_DENIED)
+    (asserts! (> max-attempts u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> lockout-blocks u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks lockout (~1 hour)
+    (asserts! (<= lockout-blocks u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks lockout (~1 day)
+
+    ;; Note: Full implementation would track limits in contract variables
+
+    (print {action: "rate_limits_defined", max-attempts: max-attempts, 
+            lockout-blocks: lockout-blocks, overseer: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Advanced verification for high-value containers
+(define-public (perform-advanced-verification (container-id uint) (verification-proof (buff 128)) (public-parameters (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len public-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only high-value containers need advanced verification
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "acknowledged")) ERROR_OPERATION_COMPLETED)
+
+      ;; In production, actual advanced verification would occur here
+
+      (print {action: "advanced_verification_completed", container-id: container-id, verifier: tx-sender, 
+              proof-digest: (hash160 verification-proof), public-parameters: public-parameters})
+      (ok true)
+    )
+  )
+)

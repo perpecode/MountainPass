@@ -227,3 +227,94 @@
   )
 )
 
+;; Execute time-locked secure recovery procedure
+(define-public (execute-time-locked-recovery (container-id uint) (recovery-code (buff 32)) (authorized-recovery-agent principal))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (quantity (get quantity container-data))
+        (required-wait-blocks u144) ;; 24 hours cooling period
+        (inception-time (get inception-block container-data))
+        (minimum-block-for-recovery (+ inception-time required-wait-blocks))
+      )
+      ;; Only overseer or recovery agent can execute recovery
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender authorized-recovery-agent)) ERROR_PERMISSION_DENIED)
+      ;; Only active containers can be recovered
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "acknowledged")
+                   (is-eq (get container-status container-data) "locked")) ERROR_OPERATION_COMPLETED)
+      ;; Enforce cooling period
+      (asserts! (>= block-height minimum-block-for-recovery) (err u270))
+      ;; Recovery agent must be neither originator nor destination
+      (asserts! (and (not (is-eq authorized-recovery-agent originator)) 
+                    (not (is-eq authorized-recovery-agent destination))) (err u271))
+
+      ;; Transfer resources back to originator
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender originator)) ERROR_MOVEMENT_UNSUCCESSFUL)
+
+      (print {action: "time_locked_recovery_executed", container-id: container-id, 
+              recovery-agent: authorized-recovery-agent, originator: originator, 
+              recovery-code-hash: (hash160 recovery-code), quantity-returned: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Return resources to originator
+(define-public (revert-resource-allocation (container-id uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      (asserts! (is-eq tx-sender SYSTEM_OVERSEER) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set HoldingRegistry
+              { container-id: container-id }
+              (merge container-data { container-status: "reverted" })
+            )
+            (print {action: "resources_returned", container-id: container-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_UNSUCCESSFUL
+      )
+    )
+  )
+)
+
+;; Rotate security credentials for container access
+(define-public (rotate-container-credentials (container-id uint) (previous-credential-hash (buff 32)) (new-credential-hash (buff 32)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (current-status (get container-status container-data))
+        (rotation-timestamp block-height)
+      )
+      ;; Only container originator can rotate credentials
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      ;; Only active containers can have credentials rotated
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "acknowledged")) ERROR_OPERATION_COMPLETED)
+      ;; Verify new credential is different from previous
+      (asserts! (not (is-eq (hash160 previous-credential-hash) (hash160 new-credential-hash))) (err u260))
+
+      ;; Record the credential rotation
+      (print {action: "credentials_rotated", container-id: container-id, 
+              originator: originator, previous-hash: (hash160 previous-credential-hash), 
+              new-hash: (hash160 new-credential-hash), timestamp: rotation-timestamp})
+      (ok rotation-timestamp)
+    )
+  )
+)

@@ -497,3 +497,83 @@
     )
   )
 )
+
+;; Suspend problematic container
+(define-public (suspend-problematic-container (container-id uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+      )
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "acknowledged")) 
+                ERROR_OPERATION_COMPLETED)
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { container-status: "suspended" })
+      )
+      (print {action: "container_suspended", container-id: container-id, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Create phased resource delivery structure
+(define-public (establish-phased-arrangement (destination principal) (resource-id uint) (quantity uint) (phases uint))
+  (let 
+    (
+      (new-id (+ (var-get latest-container-id) u1))
+      (termination-point (+ block-height LIFESPAN_BLOCK_COUNT))
+      (phase-quantity (/ quantity phases))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> phases u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= phases u5) ERROR_INVALID_QUANTITY) ;; Maximum 5 phases
+    (asserts! (acceptable-destination? destination) ERROR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* phase-quantity phases) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-container-id new-id)
+          (print {action: "phased_arrangement_established", container-id: new-id, originator: tx-sender, destination: destination, 
+                  resource-id: resource-id, quantity: quantity, phases: phases, phase-quantity: phase-quantity})
+          (ok new-id)
+        )
+      error ERROR_MOVEMENT_UNSUCCESSFUL
+    )
+  )
+)
+
+;; Transfer container responsibility
+(define-public (transfer-container-responsibility (container-id uint) (new-overseer principal) (auth-digest (buff 32)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (current-overseer (get originator container-data))
+        (current-status (get container-status container-data))
+      )
+      ;; Only current overseer or system overseer can transfer
+      (asserts! (or (is-eq tx-sender current-overseer) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      ;; New overseer must be different
+      (asserts! (not (is-eq new-overseer current-overseer)) (err u210))
+      (asserts! (not (is-eq new-overseer (get destination container-data))) (err u211))
+      ;; Only certain statuses allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "acknowledged")) ERROR_OPERATION_COMPLETED)
+      ;; Update container responsibility
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { originator: new-overseer })
+      )
+      (print {action: "responsibility_transferred", container-id: container-id, 
+              previous-overseer: current-overseer, new-overseer: new-overseer, auth-digest: (hash160 auth-digest)})
+      (ok true)
+    )
+  )
+)
+

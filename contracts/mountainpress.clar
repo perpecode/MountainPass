@@ -811,3 +811,84 @@
     )
   )
 )
+
+;; Auto-revert stalled containers after certification timeout
+(define-public (auto-revert-stalled-container (container-id uint) (verification-timeout uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> verification-timeout u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= verification-timeout u72) ERROR_INVALID_QUANTITY) ;; Maximum 72 blocks (~12 hours)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+        (inception (get inception-block container-data))
+        (stall-threshold (+ inception verification-timeout))
+      )
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender originator)) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (asserts! (>= block-height stall-threshold) (err u401)) ;; Must be past stall threshold
+
+      ;; Return resources to originator
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (print {action: "container_auto_reverted", container-id: container-id, 
+                    originator: originator, quantity: quantity, stall-blocks: verification-timeout})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_UNSUCCESSFUL
+      )
+    )
+  )
+)
+
+;; Register multi-signature approval for high-value containers
+(define-public (register-multisig-approval (container-id uint) (approver principal) (approval-signature (buff 65)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (quantity (get quantity container-data))
+      )
+      ;; Only high-value containers require multi-sig
+      (asserts! (> quantity u15000) (err u501))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (asserts! (not (is-eq approver originator)) (err u502)) ;; Approver must differ from originator
+      (asserts! (not (is-eq approver destination)) (err u503)) ;; Approver must differ from destination
+
+      (print {action: "multisig_approval_registered", container-id: container-id, 
+              originator: originator, approver: approver, signature: approval-signature})
+      (ok true)
+    )
+  )
+)
+
+;; Emergency pause for critical system vulnerability
+(define-public (emergency-system-pause (vulnerability-level uint) (vulnerability-report (string-ascii 100)))
+  (begin
+    (asserts! (is-eq tx-sender SYSTEM_OVERSEER) ERROR_PERMISSION_DENIED)
+    (asserts! (> vulnerability-level u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= vulnerability-level u3) ERROR_INVALID_QUANTITY) ;; Levels 1-3: Low, Medium, Critical
+    (let
+      (
+        (pause-duration (if (is-eq vulnerability-level u3) 
+                          u288 ;; 48 hours for critical
+                          (if (is-eq vulnerability-level u2)
+                            u144 ;; 24 hours for medium
+                            u72))) ;; 12 hours for low
+        (resume-height (+ block-height pause-duration))
+      )
+      ;; In production, additional pause mechanism implementation would appear here
+
+      (print {action: "emergency_pause_activated", vulnerability-level: vulnerability-level, 
+              resume-height: resume-height, overseer: tx-sender, report: vulnerability-report})
+      (ok resume-height)
+    )
+  )
+)

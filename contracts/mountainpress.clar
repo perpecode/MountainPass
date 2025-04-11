@@ -318,3 +318,107 @@
     )
   )
 )
+
+;; Originator cancels holding container
+(define-public (abort-holding-arrangement (container-id uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (asserts! (<= block-height (get termination-block container-data)) ERROR_CONTAINER_OUTDATED)
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set HoldingRegistry
+              { container-id: container-id }
+              (merge container-data { container-status: "aborted" })
+            )
+            (print {action: "arrangement_aborted", container-id: container-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_UNSUCCESSFUL
+      )
+    )
+  )
+)
+
+;; Prolong container duration
+(define-public (extend-holding-duration (container-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> additional-blocks u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERROR_INVALID_QUANTITY) ;; Maximum ~10 days extension
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data)) 
+        (destination (get destination container-data))
+        (current-termination (get termination-block container-data))
+        (updated-termination (+ current-termination additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "acknowledged")) ERROR_OPERATION_COMPLETED)
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { termination-block: updated-termination })
+      )
+      (print {action: "duration_extended", container-id: container-id, requester: tx-sender, new-termination-block: updated-termination})
+      (ok true)
+    )
+  )
+)
+
+;; Claim resources from outdated container
+(define-public (reclaim-outdated-resources (container-id uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+        (termination (get termination-block container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender SYSTEM_OVERSEER)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "acknowledged")) ERROR_OPERATION_COMPLETED)
+      (asserts! (> block-height termination) (err u108)) ;; Must be outdated
+      (match (as-contract (stx-transfer? quantity tx-sender originator))
+        success
+          (begin
+            (map-set HoldingRegistry
+              { container-id: container-id }
+              (merge container-data { container-status: "outdated" })
+            )
+            (print {action: "outdated_resources_reclaimed", container-id: container-id, originator: originator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_MOVEMENT_UNSUCCESSFUL
+      )
+    )
+  )
+)
+
+;; Register recovery address
+(define-public (register-recovery-address (container-id uint) (recovery-address principal))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      (asserts! (not (is-eq recovery-address tx-sender)) (err u111)) ;; Recovery address must differ
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      (print {action: "recovery_registered", container-id: container-id, originator: originator, recovery: recovery-address})
+      (ok true)
+    )
+  )
+)
+

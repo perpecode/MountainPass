@@ -892,3 +892,80 @@
     )
   )
 )
+
+;; Emergency freeze on suspicious container activity
+(define-public (emergency-freeze-container (container-id uint) (risk-level uint) (evidence-digest (buff 32)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (and (>= risk-level u1) (<= risk-level u5)) ERROR_INVALID_QUANTITY) ;; Risk levels 1-5
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+      )
+      (asserts! (or (is-eq tx-sender SYSTEM_OVERSEER) (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "acknowledged"))
+                ERROR_OPERATION_COMPLETED)
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { container-status: "frozen" })
+      )
+      (print {action: "container_frozen", container-id: container-id, reporter: tx-sender, 
+              risk-level: risk-level, evidence-digest: (hash160 evidence-digest)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement time-lock mechanism for high-value containers
+(define-public (establish-time-lock (container-id uint) (unlock-block uint) (release-schedule (list 3 uint)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> unlock-block block-height) ERROR_INVALID_QUANTITY)
+    (asserts! (<= (- unlock-block block-height) u4320) (err u230)) ;; Maximum 30 days time-lock
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (quantity (get quantity container-data))
+      )
+      (asserts! (is-eq tx-sender originator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get container-status container-data) "pending") ERROR_OPERATION_COMPLETED)
+      ;; Only for high-value containers
+      (asserts! (> quantity u10000) (err u231))
+      ;; Verify release schedule total equals container quantity
+      (asserts! (is-eq (fold + release-schedule u0) quantity) (err u232))
+
+      (print {action: "time_lock_established", container-id: container-id, originator: originator, 
+              unlock-block: unlock-block, release-schedule: release-schedule})
+      (ok unlock-block)
+    )
+  )
+)
+
+;; Quarantine suspicious resources with enhanced verification requirements
+(define-public (quarantine-suspicious-resource (container-id uint) (verification-threshold uint) (quarantine-duration uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (and (>= verification-threshold u2) (<= verification-threshold u5)) ERROR_INVALID_QUANTITY) ;; Verification levels 2-5
+    (asserts! (and (>= quarantine-duration u144) (<= quarantine-duration u1440)) ERROR_INVALID_QUANTITY) ;; 1-10 days
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (new-termination (+ block-height quarantine-duration))
+      )
+      (asserts! (is-eq tx-sender SYSTEM_OVERSEER) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") 
+                   (is-eq (get container-status container-data) "acknowledged"))
+                ERROR_OPERATION_COMPLETED)
+
+      (print {action: "resource_quarantined", container-id: container-id, overseer: tx-sender, 
+              verification-threshold: verification-threshold, quarantine-duration: quarantine-duration, 
+              new-termination: new-termination})
+      (ok new-termination)
+    )
+  )
+)
+

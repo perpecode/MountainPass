@@ -422,3 +422,78 @@
   )
 )
 
+;; Begin formal disagreement process
+(define-public (initiate-disagreement (container-id uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "acknowledged")) ERROR_OPERATION_COMPLETED)
+      (asserts! (<= block-height (get termination-block container-data)) ERROR_CONTAINER_OUTDATED)
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { container-status: "disputed" })
+      )
+      (print {action: "disagreement_initiated", container-id: container-id, initiator: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Add cryptographic verification
+(define-public (register-cryptographic-proof (container-id uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender destination)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get container-status container-data) "pending") (is-eq (get container-status container-data) "acknowledged")) ERROR_OPERATION_COMPLETED)
+      (print {action: "proof_registered", container-id: container-id, prover: tx-sender, cryptographic-proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
+
+;; Resolve disagreement with mediation
+(define-public (resolve-disagreement (container-id uint) (originator-allocation uint))
+  (begin
+    (asserts! (valid-identifier? container-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender SYSTEM_OVERSEER) ERROR_PERMISSION_DENIED)
+    (asserts! (<= originator-allocation u100) ERROR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (container-data (unwrap! (map-get? HoldingRegistry { container-id: container-id }) ERROR_CONTAINER_MISSING))
+        (originator (get originator container-data))
+        (destination (get destination container-data))
+        (quantity (get quantity container-data))
+        (originator-share (/ (* quantity originator-allocation) u100))
+        (destination-share (- quantity originator-share))
+      )
+      (asserts! (is-eq (get container-status container-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get termination-block container-data)) ERROR_CONTAINER_OUTDATED)
+
+      ;; Send originator's portion
+      (unwrap! (as-contract (stx-transfer? originator-share tx-sender originator)) ERROR_MOVEMENT_UNSUCCESSFUL)
+
+      ;; Send destination's portion
+      (unwrap! (as-contract (stx-transfer? destination-share tx-sender destination)) ERROR_MOVEMENT_UNSUCCESSFUL)
+
+      (map-set HoldingRegistry
+        { container-id: container-id }
+        (merge container-data { container-status: "resolved" })
+      )
+      (print {action: "disagreement_resolved", container-id: container-id, originator: originator, destination: destination, 
+              originator-share: originator-share, destination-share: destination-share, originator-percentage: originator-allocation})
+      (ok true)
+    )
+  )
+)
